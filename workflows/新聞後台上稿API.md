@@ -270,16 +270,13 @@ GET /api/v1/topics?limit=&page=       // 議題包列表（注意不是 further-
 | **內文插圖（含圖說）** | ✅ | 在 `content` 的 Lexical JSON 插入 `type:"image"` 節點（原本誤判為 UI-only） |
 | **存檔** | ✅ | 就是 PUT 本身，不需要點 UI 按鈕（原本誤判為 UI-only） |
 | 圖庫選圖 | ✅ | `GET /images/gallery?keyword=` 查到圖片 URL 後直接填進欄位 |
-| **本機檔案上傳** | ⚠️ | presigned URL 與 S3 上傳都能純 API（`GET /images/upload-url`），<br>但**圖片持久化那步不行**，只能走 UI 上傳，詳見下節「⚠️ 重要修正」 |
+| **本機檔案上傳** | ✅ | 純 API 可行：`upload-url` → S3 PUT → `images/process` →<br>存檔時**務必帶 `asset_images`**（漏掉圖片會 404），詳見下節 |
 | 送審／排程／發布 | ❓ | 仍未拓測，狀態機 API 未知 |
 
-**結論（2026-08-05 實跑後修正）：除了「圖片上傳」以外的所有欄位都能純 API 完成；
-圖片必須走 UI 上傳才會真正持久化**（純 API 上傳會全程 200 但最後圖片 404，詳見下節）。
+**結論（2026-08-05 最終版）：整篇稿件 100% 能純 API 完成，包含本機圖片上傳，不需要開瀏覽器。**
 
-實務最佳流程 = **API 為主 + 圖片走 UI**：
-1. 圖片：UI 上傳主圖與內文插圖（設來源／浮水印／裁切）
-2. 其餘：`POST`/`PUT /articles/{id}` 一次帶完標題、內文、分類、參與人員、標籤、
-   社群&SEO、議題包、延伸閱讀，以及修正圖說文字
+關鍵是圖片上傳除了 `upload-url` → S3 → `images/process` 三步之外，
+**存檔的 PUT 一定要帶 `asset_images` 欄位**，否則圖片不會被搬成正式檔（會全程回 200 但圖片 404）。
 
 ## 本機圖片上傳（純 API，2026-08-05 實測成功，不需要 file input）
 
@@ -330,7 +327,44 @@ Lexical `image` 節點的 `src`（內文插圖）即可。
 
 **限制**：圖片高度需 ≥600px（前端會擋，服務端是否也擋未驗證）。
 
-### ⚠️ 重要修正（2026-08-05 實跑 IMAX 稿 4002650 才發現）
+### ✅ 最終解法：`asset_images`（2026-08-05 反查前端 payload 後破解，實測成功）
+
+前面說「圖片必須走 UI」是**錯的**，真正缺的是 PUT 時要帶 **`asset_images`** 欄位。
+它就是告訴後端「這些暫存圖要轉成正式檔」的清單，沒帶就不會搬檔，圖片自然 404。
+
+```js
+// 1) presign + S3（同前）
+const {uuid: U, upload_url} = (await (await fetch('/api/v1/images/upload-url?extension=jpg')).json()).data;
+await fetch(upload_url.url, {method:'PUT', body: fileBlob, headers: upload_url.headers});
+
+// 2) process（產生預覽，同前）
+await fetch('/api/v1/images/process?' + new URLSearchParams({
+  uuid: U, extension:'jpg', width:1067, height:600,
+  crop_aspect_ratio_type:'16x9', x:0, y:115, right:3000, bottom:1802,
+  watermark_position:'lb'
+}));
+
+// 3) PUT 文章時，圖片網址用 temp 版本，並帶上 asset_images ★關鍵★
+const tempUrl = 'https://news-images.tvbs.com.tw/api/v1/image/temp/'+U+'.jpg?w=1067&h=600&t=16x9&wp=l,b&c=0,115,3000,1802';
+body.featured_image = {url: tempUrl, caption: CAP, alt: CAP};
+body.asset_images = [{
+  uuid: U,
+  extension: 'jpg',
+  source_image_id: 7,        // 圖片來源 id，7=達志影像；清單查 GET /source/image
+  remark: '',                // 對應彈窗的「備註」
+  width: 3000, height: 2000, // 原圖尺寸
+  watermark_position: 'lb',  // 不用浮水印則傳 null
+  crop: '0,115,3000,1802'    // "x,y,right,bottom"
+}];
+```
+
+存檔後後端會把 temp 檔搬成正式檔，並自動把網址裡的 `/temp/` 去掉，圖片即可正常顯示。
+**實測驗證**：帶 `asset_images` 後 `IMAGE_GET = 200`（先前不帶一律 404）。
+
+補充：完整的 UI payload 還有 `editor_images`（內文插圖）與 `gallery_images`（圖庫選圖）
+兩個同類欄位，內文插圖理論上要放進 `editor_images`，尚未單獨實測。
+
+### ⚠️ 先前的錯誤結論與排查過程（保留紀錄）
 
 上面三步**全部回 200，但圖片最後是壞的**。原因：`images/process` 產出的圖只存在
 `news-images.tvbs.com.tw/api/v1/image/**temp/**{uuid}.jpg`（temp 路徑），
@@ -343,9 +377,10 @@ Lexical `image` 節點的 `src`（內文插圖）即可。
 - 等待非同步搬檔（輪詢 20 秒）→ 一直 404
 - 找 commit/confirm/finalize/persist 類端點 → 全部 404，**不存在這種端點**
 
-**目前唯一可靠做法：圖片要走 UI 上傳**（主圖用主圖區塊的「上傳檔案」，內文插圖用
-編輯器「插入 →圖片 →上傳檔案」），送出彈窗按「完成」後，前端才會觸發真正的持久化。
-其餘欄位仍可全部用 API。
+（↑ 以上排查全部白忙，真正原因是漏了 `asset_images`，解法見上一節。留著是為了記錄
+「回 200 不等於成功」這個教訓，以及怎麼靠反查前端 payload 找出缺少的欄位：
+攔截 `XMLHttpRequest.prototype.send`（這個後台用 axios 走 XHR，攔 `window.fetch` 抓不到
+文章存檔的請求），把 UI 實際送出的 body 印出來跟自己組的 body 逐欄比對。）
 
 **踩雷**：如果文章的 `featured_image.url` 先被寫入過壞網址，主圖元件會卡住、
 重新上傳也不顯示。要先按主圖右上角垃圾桶圖示清空，再重新上傳才會正常。
