@@ -173,6 +173,66 @@ POST /api/v1/articles
 
 呼叫這兩支時不需自己帶內文參數，應該是後端直接讀該篇文章目前存的內容，未逐一驗證 request body。
 
+## 更新文章（PUT，2026-08-05 實測成功）— 幾乎所有欄位都能純 API 寫入
+
+```
+PUT /api/v1/articles/{id}
+```
+
+**關鍵發現**：後台「儲存」按鈕背後就只打這一支 PUT。也就是說原本以為「只能用 UI 操作」的
+議題包、延伸閱讀、圖說、社群&SEO，**全部都是包在這支 PUT 的 body 裡送出的，不是各自獨立的 API**。
+只要組好完整 body 就能純 API 完成整篇稿的所有欄位。
+
+### 完整 body 欄位（實測 200 成功）
+
+```js
+{
+  title, short_title, content,          // content 是 Lexical JSON 字串
+  source_article_id, category_id,
+  featured_type: "image",               // 必填
+  is_explicit: false,                   // 必填
+  display_rss: true,                    // 必填
+  hashtags: ["標籤1","標籤2"],
+  credits: [{credit_id: 1, name: "許岱軒"}, {credit_id: 5, name: "新聞中心"}],
+  featured_image: {url, caption, alt},  // caption/alt 就是「圖片說明」，可直接改
+  further_topic_id: 636,                // 議題包！636 = 全球必讀
+  related_articles: [{related_article_id: 4002405, sort: 1}, ...],  // 延伸閱讀
+  metadata: {og_title, og_description, og_image, meta_title, meta_description},  // 社群&SEO
+  dissemination_id: 1
+}
+```
+
+### 踩雷提醒
+- `related_articles` 寫入時欄位名是 **`related_article_id`**（不是 `article_id`）；
+  但 `GET` 回傳時欄位名是 `article_id`，兩邊名稱不一致，直接把 GET 結果丟回 PUT 會噴
+  422 `The related_articles.0.related_article_id field is required`。
+- 建立（POST）時 `featured_type`/`is_explicit`/`display_rss` 三個欄位都是必填，漏了會依序噴 422。
+- 更新時建議先 `GET /articles/{id}` 抓現況，改想改的欄位後整包 PUT 回去（等同覆蓋式更新）。
+
+### 議題包清單 API
+
+```
+GET /api/v1/topics?limit=&page=       // 議題包列表（注意不是 further-topics，那支是 404）
+```
+文章上存的是 `further_topic_id`；`GET /articles/{id}` 回傳的 `further_topic` 物件含 `{id, title, cover_image}`。
+「全球必讀」的 id 是 **636**。
+
+### 內文插圖的 Lexical 節點格式
+
+內文圖片在 `content` 的 Lexical JSON 裡是一個 `type: "image"` 的節點，和 `paragraph` 節點並列在
+`root.children`，欄位為：
+
+```json
+{
+  "type": "image", "version": 1,
+  "src": "圖片URL", "altText": "...", "figcaption": "圖說文字",
+  "source": "來源", "width": 0, "height": 0, "maxWidth": 0, "showAltEditor": false
+}
+```
+所以**內文插圖與其圖說也能純 API 寫入**，只要把這個節點插進 `content` 的 children 陣列
+（固定放在第 1 個和第 2 個 paragraph 之間）即可，不需要操作 Lexical 編輯器 UI。
+唯一還是得靠瀏覽器的只有「把本機檔案變成圖片 URL」這一步（S3 上傳）。
+
 ## 發稿檢查清單（踩過的雷，2026-08-05 補充）
 
 實際發一篇稿（稿號 4002543）時漏掉/做錯的地方，之後每次發稿都要對照這份清單：
@@ -194,15 +254,35 @@ POST /api/v1/articles
 - [ ] **內文插圖固定位置**：圖片固定放在**第一段與第二段中間**（不是文章開頭或結尾），
   寫內文時可以先用一段純文字佔位（例如 `__IMAGE_PLACEHOLDER__`）標記這個位置，之後再替換成圖片。
 
+## API 可行性總表（2026-08-05 完整探索後結論）
+
+| 項目 | 純 API 可行？ | 方式 |
+|---|---|---|
+| 建立文章（全欄位） | ✅ | `POST /api/v1/articles` |
+| 更新文章（全欄位） | ✅ | `PUT /api/v1/articles/{id}` |
+| 標題／短標題／內文文字 | ✅ | POST/PUT 的 `title`/`short_title`/`content` |
+| 來源／分類／參與人員 | ✅ | `source_article_id`/`category_id`/`credits` |
+| 標籤 | ✅ | `hashtags`；或 `POST /ai/hashtags:generate` 讓 AI 生 |
+| 社群&SEO | ✅ | `metadata`；或 `POST /ai/og-description:generate` 讓 AI 生 |
+| **圖片說明（圖說）** | ✅ | `featured_image.caption` / `.alt`（原本誤判為 UI-only） |
+| **議題包** | ✅ | `further_topic_id`；清單查 `GET /topics`（原本誤判為 UI-only） |
+| **延伸閱讀** | ✅ | `related_articles: [{related_article_id, sort}]`（原本誤判為 UI-only） |
+| **內文插圖（含圖說）** | ✅ | 在 `content` 的 Lexical JSON 插入 `type:"image"` 節點（原本誤判為 UI-only） |
+| **存檔** | ✅ | 就是 PUT 本身，不需要點 UI 按鈕（原本誤判為 UI-only） |
+| 圖庫選圖 | ✅ | `GET /images/gallery?keyword=` 查到圖片 URL 後直接填進欄位 |
+| **本機檔案上傳** | ❌ | 唯一真正需要瀏覽器的一步：檔案要經由 `<input type=file>` 才能上到 S3。<br>需靠 claude-in-chrome 的 `file_upload` 工具塞路徑繞過原生對話框，<br>接著才是 S3 presigned PUT + `GET /images/process` |
+| 送審／排程／發布 | ❓ | 仍未拓測，狀態機 API 未知 |
+
+**結論**：整篇稿件除了「把本機圖檔變成圖片 URL」這一步之外，其餘全部都能純 API 完成。
+如果圖片改用圖庫既有圖（`GET /images/gallery`），則可以做到 100% 純 API 發稿。
+
 ## 尚未拓測（下一步待補）
 
-- 更新既有文章：應為 `PATCH` 或 `PUT /api/v1/articles/{id}`，欄位結構應與建立時相同，未實測
 - 送審（草稿→審核中）：狀態變更 API，未拓測
 - 排程/發布：`scheduled_at` 欄位與/或另一支狀態切換 API，未拓測
-- 主圖上傳的 presigned URL 是哪支 API 發的（來不及攔截），以及最終「套用到主圖」為何這次沒生效
-- 內文中插入圖片的實際彈窗/API（使用者表示跟主圖上傳共用同一套，待驗證）
+- 主圖上傳的 presigned URL 是哪支 API 發的（發生在選檔瞬間，來不及攔截）
 - `credit_id` 完整對照表（角色 × 人名 → id）未列全，需要時查 `GET /credits`
-- 常見問題、引用、議題包、警語勾選等欄位的存檔格式未拓測
+- 常見問題（`faq`）、引用（`citations`）、警語（`warnings`）的實際存檔格式未拓測
 
 ## 注意事項
 
