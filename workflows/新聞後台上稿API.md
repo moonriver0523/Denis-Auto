@@ -270,11 +270,16 @@ GET /api/v1/topics?limit=&page=       // 議題包列表（注意不是 further-
 | **內文插圖（含圖說）** | ✅ | 在 `content` 的 Lexical JSON 插入 `type:"image"` 節點（原本誤判為 UI-only） |
 | **存檔** | ✅ | 就是 PUT 本身，不需要點 UI 按鈕（原本誤判為 UI-only） |
 | 圖庫選圖 | ✅ | `GET /images/gallery?keyword=` 查到圖片 URL 後直接填進欄位 |
-| **本機檔案上傳** | ✅ | **不需要開網頁！** `GET /images/upload-url?extension=` 直接發 presigned URL，<br>用任何 HTTP client PUT 檔案 bytes 上 S3 即可（詳見下節） |
+| **本機檔案上傳** | ⚠️ | presigned URL 與 S3 上傳都能純 API（`GET /images/upload-url`），<br>但**圖片持久化那步不行**，只能走 UI 上傳，詳見下節「⚠️ 重要修正」 |
 | 送審／排程／發布 | ❓ | 仍未拓測，狀態機 API 未知 |
 
-**結論：整篇稿件 100% 都能純 API 完成，包含本機圖片上傳，完全不需要開瀏覽器。**
-（只要能帶著登入用的 cookie 呼叫 API 即可；瀏覽器只是取得 session 的手段，不是流程必要環節。）
+**結論（2026-08-05 實跑後修正）：除了「圖片上傳」以外的所有欄位都能純 API 完成；
+圖片必須走 UI 上傳才會真正持久化**（純 API 上傳會全程 200 但最後圖片 404，詳見下節）。
+
+實務最佳流程 = **API 為主 + 圖片走 UI**：
+1. 圖片：UI 上傳主圖與內文插圖（設來源／浮水印／裁切）
+2. 其餘：`POST`/`PUT /articles/{id}` 一次帶完標題、內文、分類、參與人員、標籤、
+   社群&SEO、議題包、延伸閱讀，以及修正圖說文字
 
 ## 本機圖片上傳（純 API，2026-08-05 實測成功，不需要 file input）
 
@@ -324,6 +329,31 @@ const {preview_url} = (await (await fetch('/api/v1/images/process?' + q)).json()
 Lexical `image` 節點的 `src`（內文插圖）即可。
 
 **限制**：圖片高度需 ≥600px（前端會擋，服務端是否也擋未驗證）。
+
+### ⚠️ 重要修正（2026-08-05 實跑 IMAX 稿 4002650 才發現）
+
+上面三步**全部回 200，但圖片最後是壞的**。原因：`images/process` 產出的圖只存在
+`news-images.tvbs.com.tw/api/v1/image/**temp/**{uuid}.jpg`（temp 路徑），
+存進文章時後端會把 `/temp/` 拿掉改成正式路徑，但**實體檔案沒有被搬過去**，
+所以文章存好後圖片網址一律 404（畫面上顯示 TVBS 預設灰圖）。
+
+驗證過、確定無效的做法：
+- 直接把 `process` 回傳的 `preview_url` 存進 `featured_image.url` → 404
+- 自己組 `/temp/{uuid}.jpg?...` 存進去 → 後端照樣把 `/temp/` 去掉 → 404
+- 等待非同步搬檔（輪詢 20 秒）→ 一直 404
+- 找 commit/confirm/finalize/persist 類端點 → 全部 404，**不存在這種端點**
+
+**目前唯一可靠做法：圖片要走 UI 上傳**（主圖用主圖區塊的「上傳檔案」，內文插圖用
+編輯器「插入 →圖片 →上傳檔案」），送出彈窗按「完成」後，前端才會觸發真正的持久化。
+其餘欄位仍可全部用 API。
+
+**踩雷**：如果文章的 `featured_image.url` 先被寫入過壞網址，主圖元件會卡住、
+重新上傳也不顯示。要先按主圖右上角垃圾桶圖示清空，再重新上傳才會正常。
+
+**內文插圖的圖說**：UI 插入後 `figcaption` 只會帶系統預設的「（圖／來源）」，
+要改成檔名完整版本時，用 UI 改容易失敗，直接用 PUT 改 `content` 裡 image 節點的
+`figcaption`／`altText` 最快。同理，若 UI 操作不慎插入多張圖，也可以用 PUT
+把多餘的 image 節點從 `content.root.children` 移除。
 
 ## 尚未拓測（下一步待補）
 
