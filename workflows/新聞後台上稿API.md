@@ -253,6 +253,23 @@ GET /api/v1/topics?limit=&page=       // 議題包列表（注意不是 further-
 - [ ] 內文中插入圖片時，圖片下方系統一樣會自動帶一行簡短圖說，也要比照上一條手動改成完整版本。
 - [ ] **內文插圖固定位置**：圖片固定放在**第一段與第二段中間**（不是文章開頭或結尾），
   寫內文時可以先用一段純文字佔位（例如 `__IMAGE_PLACEHOLDER__`）標記這個位置，之後再替換成圖片。
+- [ ] **段落之間要有一行空行**：兩個文字段之間要插入一個「空的 paragraph 節點」，
+  不能讓文字段直接相鄰（2026-08-05 使用者手動修正 4002680 後補的規則）。
+  - **圖片節點前後不用加空行**，圖片直接接文字段即可（image 節點本身已有間距）。
+  - 實作：`children` 陣列組成 `[段1, 空段, 段2, 空段, 段3, 圖, 段4, 空段, 段5, …]`
+  - 空段結構就是 text 為空字串的一般 paragraph：
+    ```js
+    const EMPTY = {children:[{detail:0,format:0,mode:"normal",style:"",text:"",type:"text",version:1}],
+      direction:"ltr",format:"",indent:0,type:"paragraph",version:1,textFormat:0,textStyle:""};
+    ```
+  - 組陣列的寫法（文字段之間插空段、圖片不插）：
+    ```js
+    const out=[];
+    blocks.forEach((b,i)=>{
+      if(i>0 && b.type!=='image' && out[out.length-1].type!=='image') out.push(EMPTY);
+      out.push(b);
+    });
+    ```
 
 ## API 可行性總表（2026-08-05 完整探索後結論）
 
