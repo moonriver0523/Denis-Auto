@@ -6,3 +6,4 @@
 ## 流程清單
 
 - [線上打卡/簽退](workflows/線上打卡-簽退.md) — TVBS EIP 出勤系統線上簽退
+- [新聞後台上稿API](workflows/新聞後台上稿API.md) — TVBS 新聞後台文章建立/查詢 REST API 拓測
