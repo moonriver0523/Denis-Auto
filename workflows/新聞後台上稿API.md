@@ -270,11 +270,60 @@ GET /api/v1/topics?limit=&page=       // 議題包列表（注意不是 further-
 | **內文插圖（含圖說）** | ✅ | 在 `content` 的 Lexical JSON 插入 `type:"image"` 節點（原本誤判為 UI-only） |
 | **存檔** | ✅ | 就是 PUT 本身，不需要點 UI 按鈕（原本誤判為 UI-only） |
 | 圖庫選圖 | ✅ | `GET /images/gallery?keyword=` 查到圖片 URL 後直接填進欄位 |
-| **本機檔案上傳** | ❌ | 唯一真正需要瀏覽器的一步：檔案要經由 `<input type=file>` 才能上到 S3。<br>需靠 claude-in-chrome 的 `file_upload` 工具塞路徑繞過原生對話框，<br>接著才是 S3 presigned PUT + `GET /images/process` |
+| **本機檔案上傳** | ✅ | **不需要開網頁！** `GET /images/upload-url?extension=` 直接發 presigned URL，<br>用任何 HTTP client PUT 檔案 bytes 上 S3 即可（詳見下節） |
 | 送審／排程／發布 | ❓ | 仍未拓測，狀態機 API 未知 |
 
-**結論**：整篇稿件除了「把本機圖檔變成圖片 URL」這一步之外，其餘全部都能純 API 完成。
-如果圖片改用圖庫既有圖（`GET /images/gallery`），則可以做到 100% 純 API 發稿。
+**結論：整篇稿件 100% 都能純 API 完成，包含本機圖片上傳，完全不需要開瀏覽器。**
+（只要能帶著登入用的 cookie 呼叫 API 即可；瀏覽器只是取得 session 的手段，不是流程必要環節。）
+
+## 本機圖片上傳（純 API，2026-08-05 實測成功，不需要 file input）
+
+先前誤判為「一定要經過 `<input type=file>`」，實際上有一支專門發 presigned URL 的 API：
+
+```
+GET /api/v1/images/upload-url?extension=png
+```
+
+回傳：
+```json
+{
+  "uuid": "019fd03c-061a-702c-ac7f-ba5452bb359d",
+  "upload_url": {
+    "url": "https://t-news-news-images-tvbs-com-tw.s3.ap-northeast-1.amazonaws.com/temp/...?X-Amz-...",
+    "headers": {"Host": "..."}
+  },
+  "expires_in": 180,
+  "expires_at": "..."
+}
+```
+
+**踩雷**：`upload_url` 是**物件** `{url, headers}`，不是字串。直接把它當網址用會變成
+`[object Object]` 導致 S3 回 404（我第一次就踩到）。要取 `.url`，並把 `.headers` 原樣帶上。
+
+### 完整三步驟
+
+```js
+// 1. 要一組 presigned URL（presigned URL 有效期僅 180 秒，拿到要盡快用）
+const {uuid, upload_url} = (await (await fetch('/api/v1/images/upload-url?extension=png')).json()).data;
+
+// 2. 把檔案 bytes 直接 PUT 上 S3（任何 HTTP client 都可以，不需要 file input）
+await fetch(upload_url.url, {method: 'PUT', body: fileBlob, headers: upload_url.headers});
+
+// 3. 裁切／浮水印處理，取得可用圖片
+const q = new URLSearchParams({
+  uuid, extension: 'png',
+  width: 1067, height: 600,           // 產出尺寸
+  crop_aspect_ratio_type: '16x9',
+  x: 0, y: 0, right: 1280, bottom: 720,  // 原圖上的裁切框
+  watermark_position: 'lb'            // lb=左下, lt=左上, rb=右下, rt=右上；不加此參數=不用浮水印
+});
+const {preview_url} = (await (await fetch('/api/v1/images/process?' + q)).json()).data;
+```
+
+第 3 步回傳 `{uuid, preview_url}`，把圖片 URL 填進 `featured_image.url`（主圖）或
+Lexical `image` 節點的 `src`（內文插圖）即可。
+
+**限制**：圖片高度需 ≥600px（前端會擋，服務端是否也擋未驗證）。
 
 ## 尚未拓測（下一步待補）
 
