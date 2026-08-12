@@ -324,6 +324,25 @@ GET /api/v1/images/upload-url?extension=png
 **踩雷**：`upload_url` 是**物件** `{url, headers}`，不是字串。直接把它當網址用會變成
 `[object Object]` 導致 S3 回 404（我第一次就踩到）。要取 `.url`，並把 `.headers` 原樣帶上。
 
+**踩雷（2026-08-12）：`images/process` 的 `width`/`height` 是輸出尺寸，不是原圖尺寸**——
+千萬別把原圖真實解析度（現在的相機/AP圖常常是 5000~8000px 邊長、幾千萬像素）直接當這兩個
+參數傳進去。症狀是後端跟 `GET` 都回 200、圖片網址也能正常開啟、`naturalWidth/naturalHeight`
+也對得上，**看起來一切正常**，但在後台編輯器的縮圖框裡實際渲染會卡住，畫面呈現「上半段是
+照片、下半段是一整塊純灰色矩形」（不是煙霧或陰影，是渲染沒跑完，邊界是筆直的一條線）。
+單純呼叫 API 或用 `Image()` 檢查 `complete`/`naturalWidth` 完全看不出這個問題，**一定要
+實際截圖看畫面**才抓得到。
+
+正確做法：裁切框（`x,y,right,bottom`）可以照樣用完整原圖範圍，但 `width`/`height` 這兩個
+輸出尺寸參數要換算成合理的網頁用尺寸（例如統一縮到寬 1600px，高度依原圖長寬比等比例算出來），
+不要照抄原圖的px數：
+
+```js
+const TARGET_W = 1600;
+const outH = Math.round(TARGET_W * (origH / origW));
+const q = new URLSearchParams({uuid, extension:'jpg', width: TARGET_W, height: outH,
+  crop_aspect_ratio_type:'4x3', x:0, y:0, right:origW, bottom:origH});
+```
+
 ### 完整三步驟
 
 ```js
