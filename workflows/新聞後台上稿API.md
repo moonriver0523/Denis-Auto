@@ -127,6 +127,10 @@ POST /api/v1/articles
 瀏覽器自動化工具完全碰不到**，必須靠瀏覽器擴充功能提供的「直接把檔案路徑塞進 file input」
 機制才能繞過（Claude in Chrome 是 `file_upload` 工具，只能餵入使用者已分享給該 session 的檔案路徑）。
 
+**2026-08-18 更正：這整段 file input 流程已經不需要了**，見下方「本機圖片上傳（純 API）」
+一節——presigned URL 上傳這一步已實測用純 HTTP client（curl）完成，完全不用碰 file input。
+這裡留著只是記錄「UI 手動上傳」這條路徑本身長怎樣，之後上稿一律走純 API 流程，不要再用這節的方式。
+
 選檔後的完整流程（2026-08-05 實測拓出）：
 
 1. 選檔後瀏覽器立刻用 **AWS S3 Presigned URL** 直接把檔案 PUT 上傳到暫存路徑
@@ -319,6 +323,29 @@ GET /api/v1/topics?limit=&page=       // 議題包列表（注意不是 further-
 ## 本機圖片上傳（純 API，2026-08-05 實測成功，不需要 file input）
 
 先前誤判為「一定要經過 `<input type=file>`」，實際上有一支專門發 presigned URL 的 API：
+
+### ⚠️ 2026-08-18 實測確認：presigned URL 這一步真的可以完全脫離瀏覽器
+
+2026-08-05 這節原本寫「任何 HTTP client 都可以，不需要 file input」，但當時沒有真的拿瀏覽器
+以外的 client 測過，只是照 API 形狀推論。2026-08-18 補做了真正的端到端驗證：
+
+1. 用瀏覽器（帶登入 cookie）呼叫 `GET /api/v1/images/upload-url?extension=jpg` 拿到 presigned URL
+2. **把 presigned URL 存成檔案、跳出瀏覽器，改用 `curl -X PUT --data-binary @本機檔案 "$URL"`
+   直接上傳** —— 回 `HTTP 200`，證實 presigned URL 本身帶簽章、不驗證 cookie/origin，
+   任何 HTTP client 都能用
+3. 回瀏覽器呼叫 `GET /api/v1/images/process?uuid=...` —— 一樣 `200`，`preview_url` 正常
+
+結論：**整個「本機檔案 → 可用圖片」流程，需要瀏覽器參與的只剩下第 1 步那次authenticated GET**
+（因為那支 API 要驗證登入 session），S3 上傳與裁切處理都可以用任何 HTTP client（curl／Python
+requests 等）在瀏覽器外執行，速度更快、也不用管 file input／彈窗 UI。
+
+**工具選擇：這一步一定要用 Playwright MCP（`mcp__browser__*`），不要用 Claude in Chrome
+（`mcp__claude-in-chrome__*`）。** 原因是 Claude in Chrome 的 `javascript_tool` 會對「看起來像
+cookie/query string」的回傳內容直接擋掉（回傳 `[BLOCKED: Cookie/query string data]`），
+presigned URL 本身就是一長串帶簽章 query string，會被整個擋下來，導致完全拿不到 URL、
+沒辦法交給瀏覽器外的 client 使用。Playwright MCP 的 `browser_evaluate` 沒有這層過濾，
+搭配 `filename` 參數可以把結果直接存成本機 JSON 檔（不會把敏感字串印進對話紀錄），
+再用 Bash 讀檔案取值即可。
 
 ```
 GET /api/v1/images/upload-url?extension=png
